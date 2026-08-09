@@ -9,6 +9,7 @@ import datetime as dt
 import random
 import sys
 from pathlib import Path
+import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Font, PatternFill, Side
@@ -82,6 +83,7 @@ def perguntar_mes_ano() -> tuple[int, int]:
             print(f"Entrada inválida ({erro}). Tente novamente com números, ex: mês=6, ano=2026.")
 
 def coletar_respostas() -> dict:
+    """Modo interativo (--interativo): pergunta modo/formatação/mês/ano no terminal."""
     print("=" * 60)
     print("GERADOR DE PLANILHA DE VENDAS PARA TESTE/ANÁLISE")
     print("=" * 60)
@@ -101,9 +103,12 @@ def coletar_respostas() -> dict:
     return {"modo": modo, "formatacao": formatacao, "mes": mes, "ano": ano}
 
 def gerar_lojas() -> pd.DataFrame:
+    """Cadastro fixo de lojas (dado de referência, não depende de sorteio)."""
     return pd.DataFrame(LOJAS, columns=["loja_id", "nome_loja", "cidade", "estado", "regiao"])
 
 def gerar_vendedores(df_lojas: pd.DataFrame) -> pd.DataFrame:
+    """Sorteia um nome para cada vendedor e distribui entre as lojas em
+    round-robin (vendedor 1 -> loja 1, vendedor 2 -> loja 2, ...)."""
     linhas = []
     loja_regiao = dict(zip(df_lojas.loja_id, df_lojas.regiao))
     loja_nome = dict(zip(df_lojas.loja_id, df_lojas.nome_loja))
@@ -114,6 +119,7 @@ def gerar_vendedores(df_lojas: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(linhas, columns=["vendedor_id", "nome_vendedor", "loja_id", "nome_loja", "regiao"])
 
 def gerar_produtos() -> pd.DataFrame:
+    """Cadastro fixo de produtos, com margem calculada a partir do catálogo."""
     df = pd.DataFrame(PRODUTOS, columns=["produto_id", "categoria", "modelo",
                                           "preco_unitario", "custo_unitario", "regiao_bias"])
     df["margem_unitaria"] = (df.preco_unitario - df.custo_unitario).round(2)
@@ -121,6 +127,9 @@ def gerar_produtos() -> pd.DataFrame:
     return df.drop(columns="regiao_bias")
 
 def gerar_vendas(mes: int, ano: int, df_vendedores: pd.DataFrame, df_produtos: pd.DataFrame) -> pd.DataFrame:
+    """Sorteia QTD_VENDAS_MES vendas dentro do mês pedido: vendedor, produto,
+    quantidade (1-3, com viés pra 1) e dia do mês, todos via random.*.
+    A ordem dos sorteios por linha é: vendedor -> produto -> quantidade -> dia."""
     ultimo_dia = calendar.monthrange(ano, mes)[1]  # trata corretamente fevereiro/bissexto
     data_ini, data_fim = dt.date(ano, mes, 1), dt.date(ano, mes, ultimo_dia)
     dias_no_mes = (data_fim - data_ini).days
@@ -168,6 +177,8 @@ def aplicar_dados_faltando(df: pd.DataFrame) -> pd.DataFrame:
     return resultado
 
 def _bagunca_texto(valor):
+    """Sorteia uma variante "suja" de um texto (maiúsculo, minúsculo,
+    espaços nas pontas ou espaço duplo no meio)."""
     if pd.isna(valor):
         return valor
     texto = str(valor)
@@ -188,6 +199,8 @@ def _bagunca_numero_brl(valor):
     return texto
 
 def _bagunca_data(valor):
+    """Sorteia um dos 4 formatos de data "soltos" (ver _FORMATOS_DATA_CONHECIDOS
+    em qualidade.py — é esse o conjunto de formatos que o pipeline sabe reconhecer)."""
     if pd.isna(valor):
         return valor
     data = valor if isinstance(valor, dt.date) else pd.to_datetime(valor).date()
@@ -195,7 +208,28 @@ def _bagunca_data(valor):
     return data.strftime(random.choice(formatos))
 
 
+def _aplicar_erro_na_coluna(df: pd.DataFrame, coluna: str, colunas_texto: set[str], colunas_numero: set[str]) -> None:
+    """Bagunça o conteúdo de UMA coluna, na mesma ordem/lógica da versão
+    original — só extraído para fora do laço duplo por legibilidade, sem
+    mudar quais nem quantas vezes random.* é chamado."""
+    if coluna in colunas_texto:
+        df[coluna] = df[coluna].map(_bagunca_texto)
+    elif coluna in colunas_numero:
+        # só bagunça uma parte das linhas, pra sobrar também número "limpo";
+        # a coluna precisa virar 'object' antes, senão o pandas não deixa
+        # misturar texto (ex: "1.234,56") dentro de uma coluna float64
+        df[coluna] = df[coluna].astype(object)
+        mascara = df[coluna].notna() & (pd.Series(range(len(df))) % 3 == 0)
+        df.loc[mascara, coluna] = df.loc[mascara, coluna].map(_bagunca_numero_brl)
+    elif coluna == "data":
+        df[coluna] = df[coluna].map(_bagunca_data)
+
+
 def aplicar_erros_formatacao(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Bagunça texto, número e data em cada tabela (nessa ordem: tabela por
+    tabela, coluna por coluna, na mesma ordem de `dfs.items()`/`df.columns`)
+    — a ordem importa porque com `random.seed()` fixo ela determina
+    exatamente quais valores saem sorteados."""
     resultado = {nome: df.copy() for nome, df in dfs.items()}
 
     colunas_texto = {"nome_loja", "cidade", "estado", "regiao", "nome_vendedor",
@@ -204,23 +238,40 @@ def aplicar_erros_formatacao(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataF
     colunas_numero = {"preco_unitario", "custo_unitario", "valor_total", "custo_total",
                        "margem_unitaria"}
 
-    for nome, df in resultado.items():
+    for df in resultado.values():
         for coluna in df.columns:
-            if coluna in colunas_texto:
-                df[coluna] = df[coluna].map(_bagunca_texto)
-            elif coluna in colunas_numero:
-                # só bagunça uma parte das linhas, pra sobrar também número "limpo";
-                # a coluna precisa virar 'object' antes, senão o pandas não deixa
-                # misturar texto (ex: "1.234,56") dentro de uma coluna float64
-                df[coluna] = df[coluna].astype(object)
-                mascara = df[coluna].notna() & (pd.Series(range(len(df))) % 3 == 0)
-                df.loc[mascara, coluna] = df.loc[mascara, coluna].map(_bagunca_numero_brl)
-            elif coluna == "data":
-                df[coluna] = df[coluna].map(_bagunca_data)
-        resultado[nome] = df
+            _aplicar_erro_na_coluna(df, coluna, colunas_texto, colunas_numero)
 
     print("  -> Textos, números e datas bagunçados (maiúsc/minúsc, espaços, formato BR, datas soltas).")
     return resultado
+
+def _checar_venda_id_duplicado(vendas: pd.DataFrame) -> None:
+    """Imprime quantos venda_id duplicados existem (idealmente zero)."""
+    duplicados = vendas["venda_id"].duplicated().sum()
+    status = "(OK)" if duplicados == 0 else "(ATENÇÃO)"
+    print(f"venda_id duplicado: {duplicados} {status}")
+
+
+def _checar_campos_vazios(dfs: dict[str, pd.DataFrame]) -> None:
+    """Imprime, para cada tabela, quantas células estão vazias."""
+    for nome, df in dfs.items():
+        faltando = int(df.isna().sum().sum())
+        pct = round(faltando / df.size * 100, 2) if df.size else 0
+        print(f"Campos vazios em {nome}: {faltando} ({pct}% das células)")
+
+
+def _checar_modo_completo(vendas: pd.DataFrame, modo: str) -> None:
+    """No modo "completo" (modo == "1"), nenhum campo deveria estar vazio;
+    avisa se essa expectativa não se confirmar."""
+    if modo != "1":
+        return
+    total_vazio = int(vendas.isna().sum().sum())
+    if total_vazio == 0:
+        status = "OK, nenhum campo vazio"
+    else:
+        status = f"ATENÇÃO: eram esperados 0 vazios, mas há {total_vazio}"
+    print(f"Checagem modo completo: {status}")
+
 
 def verificar_qualidade(dfs: dict[str, pd.DataFrame], modo: str) -> None:
     """Roda checagens básicas com pandas e imprime um resumo no terminal.
@@ -233,18 +284,10 @@ def verificar_qualidade(dfs: dict[str, pd.DataFrame], modo: str) -> None:
     vendas = dfs["Vendas"]
     print(f"Linhas em Vendas: {len(vendas)}")
 
-    duplicados = vendas["venda_id"].duplicated().sum()
-    print(f"venda_id duplicado: {duplicados} " + ("(OK)" if duplicados == 0 else "(ATENÇÃO)"))
+    _checar_venda_id_duplicado(vendas)
+    _checar_campos_vazios(dfs)
+    _checar_modo_completo(vendas, modo)
 
-    for nome, df in dfs.items():
-        faltando = int(df.isna().sum().sum())
-        pct = round(faltando / df.size * 100, 2) if df.size else 0
-        print(f"Campos vazios em {nome}: {faltando} ({pct}% das células)")
-
-    if modo == "1":
-        total_vazio = int(vendas.isna().sum().sum())
-        status = "OK, nenhum campo vazio" if total_vazio == 0 else f"ATENÇÃO: eram esperados 0 vazios, mas há {total_vazio}"
-        print(f"Checagem modo completo: {status}")
     print("-" * 60)
 
 FONTE = "Arial"
@@ -253,31 +296,63 @@ FONTE_CABECALHO = Font(name=FONTE, bold=True, color="FFFFFF")
 BORDA = Border(*(Side(style="thin", color="B7B7B7"),) * 4)
 
 
+def _estilizar_cabecalho(ws) -> None:
+    """Primeira linha em negrito, branco sobre fundo azul escuro."""
+    for coluna in range(1, ws.max_column + 1):
+        celula = ws.cell(row=1, column=coluna)
+        celula.font = FONTE_CABECALHO
+        celula.fill = FUNDO_CABECALHO
+
+
+def _aplicar_bordas_e_fonte(ws) -> None:
+    """Borda fina em toda célula; fonte padrão nas linhas de dado (a linha
+    1 já ficou com a fonte do cabeçalho em _estilizar_cabecalho)."""
+    for linha in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+        for celula in linha:
+            celula.border = BORDA
+            if celula.row > 1:
+                celula.font = Font(name=FONTE)
+
+
+def _ajustar_largura_colunas(ws) -> None:
+    """Largura de cada coluna proporcional ao maior valor nela, entre 10 e 30."""
+    for coluna in range(1, ws.max_column + 1):
+        letra = get_column_letter(coluna)
+        maior = max((len(str(c.value)) for c in ws[letra] if c.value is not None), default=10)
+        ws.column_dimensions[letra].width = min(max(maior + 2, 10), 30)
+
+
+def _congelar_cabecalho_e_habilitar_filtro(ws) -> None:
+    """Congela a linha 1 (cabeçalho) e liga o autofiltro na planilha inteira."""
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+
+def _formatar_planilha(workbook, nomes_abas) -> None:
+    """Aplica todo o estilo visual (cabeçalho, bordas, largura, filtro) em
+    cada aba do workbook."""
+    for nome in nomes_abas:
+        ws = workbook[nome]
+        _estilizar_cabecalho(ws)
+        _aplicar_bordas_e_fonte(ws)
+        _ajustar_largura_colunas(ws)
+        _congelar_cabecalho_e_habilitar_filtro(ws)
+
+
 def salvar_excel(dfs: dict[str, pd.DataFrame], caminho: Path) -> None:
+    """Escreve cada DataFrame como uma aba e aplica formatação visual.
+
+    Duas passadas: primeiro o pandas escreve os dados (rápido, sem estilo),
+    depois o openpyxl reabre o arquivo só para aplicar o estilo — é mais
+    simples que formatar célula a célula durante a escrita.
+    """
     with pd.ExcelWriter(caminho, engine="openpyxl") as writer:
         for nome, df in dfs.items():
             df.to_excel(writer, sheet_name=nome, index=False)
 
-    # segunda passada: formatação visual com openpyxl
-    wb = load_workbook(caminho)
-    for nome in dfs:
-        ws = wb[nome]
-        for coluna in range(1, ws.max_column + 1):
-            celula = ws.cell(row=1, column=coluna)
-            celula.font = FONTE_CABECALHO
-            celula.fill = FUNDO_CABECALHO
-        for linha in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
-            for celula in linha:
-                celula.border = BORDA
-                if celula.row > 1:
-                    celula.font = Font(name=FONTE)
-        for coluna in range(1, ws.max_column + 1):
-            letra = get_column_letter(coluna)
-            maior = max((len(str(c.value)) for c in ws[letra] if c.value is not None), default=10)
-            ws.column_dimensions[letra].width = min(max(maior + 2, 10), 30)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
-    wb.save(caminho)
+    workbook = load_workbook(caminho)
+    _formatar_planilha(workbook, dfs.keys())
+    workbook.save(caminho)
 
 def gerar_modelo(mes: int, ano: int, modo: str, formatacao: str, pasta_destino: Path) -> Path:
     """Gera um único cenário; usado tanto pela CLI quanto pelo GitHub Actions."""
@@ -316,7 +391,22 @@ def gerar_modelo(mes: int, ano: int, modo: str, formatacao: str, pasta_destino: 
     return caminho_saida
 
 
+def _semear(seed: int) -> None:
+    """Semeia os DOIS geradores de números aleatórios usados no script.
+
+    `random.seed()` sozinho NÃO é suficiente: `df.sample()` (usado em
+    gerar_vendas() para sortear o vendedor de cada venda) usa o RNG
+    global do numpy, que é totalmente independente do `random` da
+    biblioteca padrão. Sem semear os dois, só parte dos sorteios (produto,
+    quantidade, dia do mês) é reproduzível — o vendedor sorteado muda a
+    cada execução, mesmo com a mesma seed.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 def main() -> None:
+    """CLI: modo padrão gera os 2 cenários de CI; --interativo pergunta no terminal."""
     parser = argparse.ArgumentParser(description="Gera planilhas de teste para a esteira de dados.")
     parser.add_argument("--mes", type=int, default=6, choices=range(1, 13), help="Mês de referência (padrão: 6).")
     parser.add_argument("--ano", type=int, default=2026, help="Ano de referência (padrão: 2026).")
@@ -327,15 +417,15 @@ def main() -> None:
 
     if args.interativo:
         respostas = coletar_respostas()
-        random.seed(args.seed)
+        _semear(args.seed)
         gerar_modelo(respostas["mes"], respostas["ano"], respostas["modo"], respostas["formatacao"], args.destino)
         return
 
     # Modo padrão, próprio para CI: sempre produz os dois cenários solicitados.
     print("Gerando os dois modelos não interativos para validação automática...")
-    random.seed(args.seed)
+    _semear(args.seed)
     gerar_modelo(args.mes, args.ano, "1", "1", args.destino)
-    random.seed(args.seed + 1)
+    _semear(args.seed + 1)
     gerar_modelo(args.mes, args.ano, "2", "2", args.destino)
     print("Concluído: modelo íntegro e modelo com pendências/formatação incorreta.")
 

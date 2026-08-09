@@ -58,3 +58,56 @@ python src/analise.py --origem "C:\caminho\vendas_eletronicos_1S2026.db" --desti
 | `itens_por_regiao_data` | Produtos por região em cada período solicitado |
 
 O script preserva as tabelas do banco de origem ao copiar o arquivo antes de acrescentar a camada analítica.
+
+# Dashboard executivo (Dash)
+Além dos dados publicados em SQLite, o projeto inclui um dashboard visual em `dashboards/` — feito com **Dash + Plotly + dash-bootstrap-components** —, que lê diretamente o banco gerado por `src/analise.py` e apresenta os indicadores acima (participação por região, por vendedor, evolução mensal, mix de produtos e as pendências de qualidade) em uma interface web, sem precisar do Power BI.
+
+Ele não reprocessa nada: é só uma camada de visualização por cima do que o pipeline já produz.
+
+## Como rodar o dashboard
+```bash
+cd dashboards
+pip install -r requirements.txt
+python app.py
+```
+Depois acesse `http://localhost:8050` no navegador.
+
+O dashboard acha o banco de dados automaticamente: como ele está dentro desta pasta do projeto, ele lê o `.sqlite` mais recente em `data/resultados/` sozinho — não importa o nome que você deu em `--destino` ao rodar `src/analise.py`. Ou seja, depois de rodar os passos da seção **Execução** acima, é só rodar `python dashboards/app.py` que os números já aparecem atualizados.
+
+Se quiser apontar para um banco em outro lugar, defina a variável de ambiente `DASHBOARD_DB_PATH` antes de rodar `app.py`. Mais detalhes de arquitetura estão em `dashboards/README.md`.
+
+# Testes automatizados
+
+O projeto tem uma suíte de testes em `tests/` (pytest) que funciona como rede de segurança para qualquer mudança futura no pipeline — principalmente refatorações que não devem alterar nenhum resultado numérico.
+
+## Como rodar
+```bash
+pip install -r requirements.txt
+python -m pytest tests/
+```
+
+## O que cada arquivo cobre
+- **`test_analise.py`** — testa `percentual()` e `por_periodo()` isoladamente, com números pequenos e verificáveis à mão (sem depender do pipeline Excel → SQLite inteiro).
+- **`test_qualidade.py`** — testa `_texto`, `_numero`, `_data`, `padronizar`, `auditoria_pendencias` e `marcar_pendencias` com casos-limite (registro único, dados vazios, valores nulos, `venda_id` duplicado, formatos numéricos equivalentes como `1234.56` / `1.234,56` / `R$ 1.234,56`).
+- **`test_regressao_pipeline.py`** — roda o pipeline completo contra `data/raw/vendas_eletronicos_1S2026.db` e compara, tabela por tabela e sem tolerância numérica, com o resultado congelado em `tests/fixtures/baseline_analise.sqlite`.
+
+## Se um resultado mudar de propósito
+
+Se uma mudança de comportamento for intencional (uma correção de bug, uma nova regra de negócio), o `tests/fixtures/baseline_analise.sqlite` precisa ser deliberadamente regenerado — nunca "consertado" só para o teste voltar a passar. Para regenerar:
+```bash
+cd src
+python analise.py --origem ../data/raw/vendas_eletronicos_1S2026.db --destino ../tests/fixtures/baseline_analise.sqlite
+```
+
+## Resultado (radon + pylint)
+
+| Função | Complexidade antes | Complexidade depois |
+|---|---:|---:|
+| `salvar_excel` | 10 | 2 (dividida em 5 funções, a maior com complexidade 4) |
+| `padronizar` | 8 | 1 (dividida em 7 funções, cada uma complexidade 2) |
+| `aplicar_erros_formatacao` | 7 | 4 |
+| `verificar_qualidade` | 6 | 1 (dividida em 3 funções) |
+| `auditoria_pendencias` | 6 | 5 |
+| `marcar_pendencias` | 6 | 3 (dividida em 3 funções) |
+
+Índice de manutenibilidade (radon mi): `analise.py` 46,94 → 71,87; `qualidade.py` 55,31 → 61,46; `gerar_planilha.py` 38,19 → 42,02 — todos os 5 arquivos de `src/` classificados **A**. As categorias de estilo `missing-function-docstring` e `multiple-statements`, antes recorrentes, foram zeradas.

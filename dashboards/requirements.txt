@@ -1,0 +1,9 @@
+# Pipeline de dados original (mantido)
+pandas>=2.2
+pandera>=0.20
+openpyxl>=3.1
+
+# Dashboard
+dash>=2.17
+dash-bootstrap-components>=1.6
+plotly>=5.22
